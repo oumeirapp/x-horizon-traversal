@@ -1,0 +1,1 @@
+pyinstaller --windowed --name "X Traversal" --icon=logo.icns --add-data "logo.png:." app.py
