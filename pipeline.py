@@ -359,13 +359,18 @@ def resize_videos(folder: Path):
 #  Main entry point
 # ═════════════════════════════════════════════════════════════
 
-def process_all(root: str = "../", output_dir: str = "./output"):
+def process_all(root: str = "../", output_dir: str = "./output", folders: list[str] | None = None):
     root_path   = Path(root)
     output_root = Path(output_dir)
 
-    ticket_folders = sorted([p for p in root_path.iterdir() if p.is_dir()])
+    if folders is not None:
+        # Use the explicit list passed in from the UI (already filtered by app.py)
+        ticket_folders = sorted([Path(f) for f in folders], key=lambda p: p.name)
+    else:
+        # CLI / default behaviour — scan the entire root directory
+        ticket_folders = sorted([p for p in root_path.iterdir() if p.is_dir()])
 
-    _info(f"PIPELINE START — {len(ticket_folders)} ticket(s) found")
+    _info(f"PIPELINE START — {len(ticket_folders)} ticket(s) to process")
     _info(f"Input:  {root_path.resolve()}")
     _info(f"Output: {output_root.resolve()}")
 
