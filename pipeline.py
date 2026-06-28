@@ -127,7 +127,7 @@ def collect_recursive(
                 continue
 
             dest = safe_copy(item, dest_dir)
-            _ok(f"Copied  {item.name}  →  {dest.name}")
+            _ok(f"Copied  {item.name}")
             copied += 1
 
         elif item.is_dir() and not inside_version:
@@ -180,7 +180,7 @@ def convert_pdfs(folder: Path, scale: int = 2, remove_pdf: bool = True):
             img.save(output_path)
             pdf.close()
 
-            _ok(f"PDF converted: {pdf_file.name}  →  {output_path.name}")
+            _ok(f"PDF converted: {pdf_file.name}")
             count += 1
 
             if remove_pdf:
