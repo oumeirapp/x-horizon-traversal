@@ -7,12 +7,34 @@ from dataclasses import dataclass
 from enum import Enum
 from PIL import Image
 import pypdfium2 as pdfium
+import sys
 
-try:
-    import ffmpeg
-except ImportError:
-    print("[ERROR] ffmpeg-python is not installed. Run: pip install ffmpeg-python")
-    import sys; sys.exit(1)
+import subprocess
+
+
+def resource_path(name: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / name
+
+
+def get_binary(name: str) -> str:
+    # bundled app
+    if getattr(sys, "frozen", False):
+        path = resource_path(name)
+        if not path.exists():
+            raise FileNotFoundError(f"Bundled binary not found: {path}")
+        return str(path)
+
+    # dev mode
+    import shutil
+    path = shutil.which(name)
+    if path is None:
+        raise RuntimeError(f"{name} not found in PATH (install ffmpeg)")
+    return path
+
+
+FFMPEG = get_binary("ffmpeg")
+FFPROBE = get_binary("ffprobe")
 
 # decompression bomb protection
 Image.MAX_IMAGE_PIXELS = None
@@ -108,6 +130,7 @@ def collect_recursive(
     extensions: set[str],
     inside_version: bool = False,
     traversal_root: Path | None = None,
+    copied_files: list[Path] | None = None,
 ) -> int:
     """
     Recursively collect files from current_dir into dest_dir (flat).
@@ -127,6 +150,8 @@ def collect_recursive(
                 continue
 
             dest = safe_copy(item, dest_dir)
+            if copied_files is not None:
+                copied_files.append(item.resolve())
             _ok(f"Copied  {item.name}")
             copied += 1
 
@@ -143,8 +168,12 @@ def collect_recursive(
         latest_folder = version_folders[latest_num]
         _ok(f"Latest version selected: {latest_folder.name}")
         copied += collect_recursive(
-            latest_folder, dest_dir, extensions,
-            inside_version=True, traversal_root=traversal_root
+            latest_folder, 
+            dest_dir, 
+            extensions,
+            inside_version=True, 
+            traversal_root=traversal_root,
+            copied_files=copied_files,
         )
     else:
         for item in current_dir.iterdir():
@@ -152,8 +181,12 @@ def collect_recursive(
                 if not inside_version and VERSION_PATTERN.search(item.name):
                     continue
                 copied += collect_recursive(
-                    item, dest_dir, extensions,
-                    inside_version, traversal_root
+                    item, 
+                    dest_dir, 
+                    extensions,
+                    inside_version, 
+                    traversal_root,
+                    copied_files,
                 )
 
     return copied
@@ -231,29 +264,28 @@ HD_SHORT = 720
 
 
 def probe_video(path: str) -> dict:
-    """Extract width, height and duration from a video file via ffprobe."""
-    try:
-        info = ffmpeg.probe(path)
-    except ffmpeg.Error as exc:
-        raise RuntimeError(
-            f"Could not probe '{path}':\n{exc.stderr.decode().strip()}\n\n"
-            "Make sure FFmpeg is installed and on your PATH: "
-            "https://ffmpeg.org/download.html"
-        )
+    cmd = [
+        FFPROBE,
+        "-v", "error",
+        "-print_format", "json",
+        "-show_streams",
+        "-show_format",
+        path
+    ]
 
-    video_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    import json
+    info = json.loads(result.stdout)
+
+    video_streams = [s for s in info["streams"] if s["codec_type"] == "video"]
     if not video_streams:
-        raise RuntimeError(f"No video stream found in '{path}'.")
+        raise RuntimeError("No video stream found")
 
     stream = video_streams[0]
-    try:
-        width    = int(stream["width"])
-        height   = int(stream["height"])
-        duration = float(
-            stream.get("duration") or info.get("format", {}).get("duration", 0)
-        )
-    except (KeyError, ValueError) as exc:
-        raise RuntimeError(f"Could not parse video dimensions: {exc}")
+
+    width = int(stream["width"])
+    height = int(stream["height"])
+    duration = float(info["format"].get("duration", 0))
 
     return {"width": width, "height": height, "duration": duration}
 
@@ -282,24 +314,19 @@ def compute_target_dimensions(width: int, height: int) -> tuple | None:
     return (new_long, new_short) if is_landscape else (new_short, new_long)
 
 
-def _ffmpeg_resize_video(input_path: str, output_path: str, target_dims: tuple) -> None:
-    """Run ffmpeg scale filter, copy audio, write to output_path."""
-    tw, th = target_dims
-    try:
-        input_node = ffmpeg.input(input_path)
-        video = input_node.video.filter("scale", tw, th, flags="lanczos")
-        audio = input_node.audio
-        (
-            ffmpeg
-            .output(video, audio, output_path, vcodec="libx264", acodec="copy",
-                    **{"movflags": "+faststart"})
-            .overwrite_output()
-            .run(quiet=True)
-        )
-    except ffmpeg.Error as exc:
-        raise RuntimeError(
-            f"FFmpeg error during resize:\n{exc.stderr.decode().strip()}"
-        )
+
+def _ffmpeg_resize_video(input_path: str, output_path: str, w: int, h: int):
+    cmd = [
+        FFMPEG,
+        "-y",
+        "-i", input_path,
+        "-vf", f"scale={w}:{h}",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        output_path
+    ]
+
+    subprocess.run(cmd, check=True)
 
 
 def human_size(path: str) -> str:
@@ -324,37 +351,41 @@ def resize_videos(folder: Path):
     for video_file in folder.iterdir():
         if not (video_file.is_file() and video_file.suffix.lower() in video_extensions):
             continue
+
         try:
             meta = probe_video(str(video_file))
             w, h = meta["width"], meta["height"]
+
             target = compute_target_dimensions(w, h)
 
             if target is None:
-                _info(f"Video within HD bounds, skipped: {video_file.name}  ({w}×{h})")
+                _info(f"Video within HD bounds, skipped: {video_file.name} ({w}×{h})")
                 continue
 
+            tw, th = target
+
             tmp_path = video_file.with_stem(video_file.stem + "_tmp")
-            _ffmpeg_resize_video(str(video_file), str(tmp_path), target)
+
+            # ✅ REPLACEMENT LINE (this is the important part)
+            _ffmpeg_resize_video(str(video_file), str(tmp_path), tw, th)
 
             size_before = human_size(str(video_file))
             video_file.unlink()
             tmp_path.rename(video_file)
             size_after = human_size(str(video_file))
 
-            tw, th = target
             _ok(
-                f"Video resized: {video_file.name}  "
-                f"({w}×{h}  →  {tw}×{th})  "
-                f"{size_before}  →  {size_after}"
+                f"Video resized: {video_file.name} "
+                f"({w}×{h} → {tw}×{th}) "
+                f"{size_before} → {size_after}"
             )
+
             count += 1
 
         except Exception as e:
             _err(f"Failed to resize video {video_file.name}: {e}")
 
     _info(f"Videos resized: {count}")
-
-
 # ═════════════════════════════════════════════════════════════
 #  Main entry point
 # ═════════════════════════════════════════════════════════════
@@ -362,6 +393,7 @@ def resize_videos(folder: Path):
 def process_all(root: str = "../", output_dir: str = "./output", folders: list[str] | None = None):
     root_path   = Path(root)
     output_root = Path(output_dir)
+    copied_files: list[Path] = []
 
     if folders is not None:
         # Use the explicit list passed in from the UI (already filtered by app.py)
@@ -397,8 +429,11 @@ def process_all(root: str = "../", output_dir: str = "./output", folders: list[s
             for source_dir in source_folders:
                 _info(f"Traversing deliverables: {source_dir.relative_to(ticket_folder)}")
                 total_copied += collect_recursive(
-                    source_dir, ticket_output, EXTENSIONS,
-                    traversal_root=source_dir
+                    source_dir, 
+                    ticket_output, 
+                    EXTENSIONS,
+                    traversal_root=source_dir,
+                    copied_files=copied_files,
                 )
 
             _ok(f"Total files copied: {total_copied}")
@@ -411,6 +446,15 @@ def process_all(root: str = "../", output_dir: str = "./output", folders: list[s
 
             # ── 4. RESIZE VIDEOS ──────────────────────────────────
             resize_videos(ticket_output)
+
+            report_path = ticket_output / "report.txt"
+
+            with report_path.open("w", encoding="utf-8") as f:
+                for path in copied_files:
+                    f.write(f"{path}\n")
+
+            _ok(f"Report created: {report_path.name}")
+
 
             _ok(f"Ticket completed: {ticket_folder.name}")
             _info(f"Output directory: {ticket_output.resolve()}")

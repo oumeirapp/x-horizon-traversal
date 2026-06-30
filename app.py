@@ -11,9 +11,11 @@ import time
 import sys
 import subprocess
 import platform
-
 import pipeline
 from pipeline import LogEntry, LogType
+
+print("sys.path =", sys.path)
+print("frozen =", getattr(sys, "frozen", False))
 
 
 def resource_path(relative: str) -> Path:
@@ -89,7 +91,8 @@ def open_folder(path: str):
     """Open a folder in the native file manager."""
     try:
         if platform.system() == "Windows":
-            subprocess.Popen(["explorer", path])
+            normalized = str(Path(path).resolve())
+            subprocess.Popen(["explorer", normalized])
         elif platform.system() == "Darwin":
             subprocess.Popen(["open", path])
         else:
@@ -297,17 +300,18 @@ class App(tk.Tk):
         ef_inner = tk.Frame(ef_outer, bg=SURFACE2)
         ef_inner.pack(fill="x", padx=1, pady=1)
 
-        path_lbl = tk.Label(
+        path_entry = tk.Entry(
             ef_inner,
             textvariable=var,
             font=FONT_MONO,
-            fg=FG,
             bg=SURFACE2,
-            anchor="w",
-            padx=10,
-            pady=8,
+            fg=FG,
+            insertbackground=TEAL,
+            relief="flat",
+            highlightthickness=0,
+            bd=0,
         )
-        path_lbl.pack(fill="x")
+        path_entry.pack(fill="x", ipady=8, padx=10)
 
         if browsable:
             btn = self._browse_btn(row, lambda v=var: self._browse(v))
@@ -1005,10 +1009,17 @@ class App(tk.Tk):
     # ─────────────────────────────────────────────────────────
 
     def _on_run(self):
+        # to remove later
+        # INPUT_DIR = "/Users/oumeir/company-workspace/horizon-asset-traversal/all-tickets"
+        # OUTPUT_DIR = "/Users/oumeir/company-workspace/horizon-asset-traversal/output"
+
+        INPUT_DIR = ""
+        OUTPUT_DIR = ""
+        
         if not self._run_btn_enabled:
             return
-        input_dir = self.input_var.get().strip()
-        output_dir = self.output_var.get().strip()
+        input_dir = self.input_var.get().strip() or INPUT_DIR
+        output_dir = self.output_var.get().strip() or OUTPUT_DIR
         if not input_dir or not Path(input_dir).is_dir():
             return
         if not output_dir:
