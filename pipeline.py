@@ -278,6 +278,7 @@ def probe_video(path: str) -> dict:
     info = json.loads(result.stdout)
 
     video_streams = [s for s in info["streams"] if s["codec_type"] == "video"]
+    audio_streams = [s for s in info["streams"] if s["codec_type"] == "audio"]
     if not video_streams:
         raise RuntimeError("No video stream found")
 
@@ -287,7 +288,12 @@ def probe_video(path: str) -> dict:
     height = int(stream["height"])
     duration = float(info["format"].get("duration", 0))
 
-    return {"width": width, "height": height, "duration": duration}
+    return {
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "audio_streams": len(audio_streams),
+    }
 
 
 def compute_target_dimensions(width: int, height: int) -> tuple | None:
@@ -315,14 +321,32 @@ def compute_target_dimensions(width: int, height: int) -> tuple | None:
 
 
 
-def _ffmpeg_resize_video(input_path: str, output_path: str, w: int, h: int):
+def _ffmpeg_resize_video(
+    input_path: str,
+    output_path: str,
+    w: int,
+    h: int,
+    has_audio: bool,
+):
+    suffix = Path(output_path).suffix.lower()
+    audio_args = []
+    if has_audio:
+        audio_args = (
+            ["-c:a", "aac", "-b:a", "192k"]
+            if suffix in {".mp4", ".mov"}
+            else ["-c:a", "copy"]
+        )
+
     cmd = [
         FFMPEG,
         "-y",
         "-i", input_path,
+        "-map", "0:v:0",
+        "-map", "0:a?",
         "-vf", f"scale={w}:{h}",
         "-c:v", "libx264",
-        "-c:a", "copy",
+        "-pix_fmt", "yuv420p",
+        *audio_args,
         output_path
     ]
 
@@ -366,8 +390,18 @@ def resize_videos(folder: Path):
 
             tmp_path = video_file.with_stem(video_file.stem + "_tmp")
 
-            # ✅ REPLACEMENT LINE (this is the important part)
-            _ffmpeg_resize_video(str(video_file), str(tmp_path), tw, th)
+            _ffmpeg_resize_video(
+                str(video_file),
+                str(tmp_path),
+                tw,
+                th,
+                meta["audio_streams"] > 0,
+            )
+
+            resized_meta = probe_video(str(tmp_path))
+            if meta["audio_streams"] > 0 and resized_meta["audio_streams"] == 0:
+                tmp_path.unlink(missing_ok=True)
+                raise RuntimeError("Resized file is missing the original audio track")
 
             size_before = human_size(str(video_file))
             video_file.unlink()
